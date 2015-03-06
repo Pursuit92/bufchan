@@ -10,71 +10,70 @@ type Element list.Element
 type BufChan struct {
 	buf *list.List
 	// need two mutexes - one for channel blocking and one for operation locking
-	mut * sync.Mutex
-	status * sync.Mutex
+	mut    *sync.Mutex
+	empty  *sync.Mutex
 	closed bool
 }
 
 func New() (ch *BufChan) {
-	var mut,status sync.Mutex
+	var mut, empty sync.Mutex
 
-	ch = new(BufChan)
-	ch.mut = &mut
-	ch.status = &status
-	ch.buf = list.New()
+	ch = &BufChan{
+		mut:   &mut,
+		empty: &empty,
+		buf:   list.New(),
+	}
 
-	// start out empty and "open"
-	ch.status.Lock()
-	ch.closed = false
+	// start out empty
+	ch.empty.Lock()
 	return ch
 }
 
 func (ch BufChan) Send(v interface{}) {
 	ch.mut.Lock()
-	defer ch.mut.Unlock()
-	// if it's not empty, we need to wait till any other operations are done
-	if ch.buf.Front() != nil {
-		ch.status.Lock()
+	// if it's empty, adding something should unblock the empty mutex.
+	if ch.closed {
+		ch.mut.Unlock()
+		return
+	}
+	if ch.buf.Len() == 0 {
+		ch.empty.Unlock()
 	}
 	ch.buf.PushBack(v)
-	ch.status.Unlock()
+	ch.mut.Unlock()
 }
 
-func (ch BufChan) Receive() (v *list.Element) {
-	ch.mut.Lock()
-	defer ch.mut.Unlock()
-	if ch.closed && ch.buf.Front() == nil {
-		return nil
+func (ch BufChan) Receive() (v interface{}, ok bool) {
+	for {
+		ch.empty.Lock()
+		ch.mut.Lock()
+		if ch.buf.Len() != 0 {
+			break
+		} else {
+			if ch.closed {
+				ch.empty.Unlock()
+				ch.mut.Unlock()
+				return nil, false
+			}
+		}
+		ch.empty.Unlock()
+		ch.mut.Unlock()
 	}
-	ch.status.Lock()
-	v = ch.buf.Front()
-	ch.buf.Remove(v)
-	newv := ch.buf.Front()
-	// if it's not empty, need to unlock
-	if newv != nil {
-		ch.status.Unlock()
+	v = ch.buf.Remove(ch.buf.Front())
+	if ch.buf.Len() != 0 || ch.closed {
+		ch.empty.Unlock()
 	}
-	return v
-}
-
-func (ch BufChan) Empty() (ret bool) {
-	ch.mut.Lock()
-	defer ch.mut.Unlock()
-	if ch.buf.Front() == nil {
-		ret = true
-	}
-	return ret
-}
-
-func (ch BufChan) Closed() bool {
-	ch.mut.Lock()
-	defer ch.mut.Unlock()
-	closed := ch.closed
-	return closed
+	ch.mut.Unlock()
+	return v, true
 }
 
 func (ch *BufChan) Close() {
 	ch.mut.Lock()
-	defer ch.mut.Unlock()
+	println("Setting closed to true")
 	ch.closed = true
+	if ch.buf.Len() == 0 {
+		println("unlcoking the empty mut")
+		ch.empty.Unlock()
+	}
+	ch.mut.Unlock()
 }
